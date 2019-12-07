@@ -201,7 +201,8 @@ func (txi *TxIndex) Search(q *query.Query) ([]*types.TxResult, error) {
 
 		for _, r := range ranges {
 			if !hashesInitialized {
-				filteredHashes = txi.matchRange(r, startKey(r.key), filteredHashes, true)
+				hashes = txi.matchRange(r, startKey(r.key))
+				//filteredHashes = txi.matchRange(r, startKey(r.key), filteredHashes, true)
 				hashesInitialized = true
 
 				// Ignore any remaining conditions if the first condition resulted
@@ -210,7 +211,8 @@ func (txi *TxIndex) Search(q *query.Query) ([]*types.TxResult, error) {
 					break
 				}
 			} else {
-				filteredHashes = txi.matchRange(r, startKey(r.key), filteredHashes, false)
+				hashes = intersect(hashes, txi.matchRange(r, startKey(r.key)))
+				//filteredHashes = txi.matchRange(r, startKey(r.key), filteredHashes, false)
 			}
 		}
 	}
@@ -219,32 +221,55 @@ func (txi *TxIndex) Search(q *query.Query) ([]*types.TxResult, error) {
 	height := lookForHeight(conditions)
 
 	// for all other conditions
+	//sigmoid hqueue
 	for i, c := range conditions {
 		if cmn.IntInSlice(i, skipIndexes) {
 			continue
 		}
 
-		if !hashesInitialized {
-			filteredHashes = txi.match(c, startKeyForCondition(c, height), filteredHashes, true)
-			hashesInitialized = true
-
-			// Ignore any remaining conditions if the first condition resulted
-			// in no matches (assuming implicit AND operand).
-			if len(filteredHashes) == 0 {
-				break
+		if height == 0 {
+			// original tendermint code
+			// sigmoid hqueue
+			if !hashesInitialized {
+				hashes = txi.match(c, startKeyForCondition(c, height))
+					hashesInitialized = true
+			} else {
+				hashes = intersect(hashes, txi.match(c, startKeyForCondition(c, height)))
 			}
 		} else {
-			filteredHashes = txi.match(c, startKeyForCondition(c, height), filteredHashes, false)
+			// skip tx.Height==X condition
+			if !(c.Tag == types.TxHeightKey && c.Op == query.OpEqual) {
+				// let's find hashes from height-100 to height-0
+				// sigmoid hqueue
+				hashesH := make([][]byte,0)
+				for h:=0 ; h <100 ; h++ {
+					hashesH = append(hashesH, txi.match(c, startKeyForCondition(c, height - int64(h)))...)
+					fmt.Printf("############################[%d] %d\n", height - int64(h), len(hashesH))
+				}
+
+				if !hashesInitialized {
+					hashes = hashesH
+					hashesInitialized = true
+				} else {
+					fmt.Printf("############################intersect hashes %d and hashesH %d\n", len(hashes), len(hashesH))
+					hashes = intersect(hashes, hashesH)
+					fmt.Printf("############################result %d\n", len(hashes))
+				}
+			}
 		}
 	}
 
-	results := make([]*types.TxResult, 0, len(filteredHashes))
-	for _, h := range filteredHashes {
-		res, err := txi.Get(h)
+	fmt.Printf("############################: len(hashes) before starting get(): %d\n", len(hashes))
+	results := make([]*types.TxResult, len(hashes))
+	//results := make([]*types.TxResult, 200)
+
+	i := 0
+	for _, h := range hashes {
+		results[i], err = txi.Get(h)
 		if err != nil {
 			return nil, errors.Wrapf(err, "failed to get Tx{%X}", h)
 		}
-		results = append(results, res)
+		i++
 	}
 
 	// sort by height & index by default
@@ -254,6 +279,36 @@ func (txi *TxIndex) Search(q *query.Query) ([]*types.TxResult, error) {
 		}
 		return results[i].Height < results[j].Height
 	})
+	fmt.Printf("############################: len(results) before starting get(): %d\n", len(results))
+/*
+	i := 0
+	for _, h := range hashes {
+		results[i], err = txi.Get(h)
+		if err != nil {
+			return nil, errors.Wrapf(err, "failed to get Tx{%X}", h)
+		}
+		i++
+		// sort by height & index by default
+		if i >= 200 {
+			sort.Slice(results, func(i, j int) bool {
+			if results[i].Height == results[j].Height {
+				return results[i].Index < results[j].Index
+			}
+			return results[i].Height < results[j].Height
+			})
+		   i = 101
+		}
+	}
+
+	// sort by height & index by default
+	sort.Slice(results, func(i, j int) bool {
+		if results[i].Height == results[j].Height {
+			return results[i].Index < results[j].Index
+		}
+		return results[i].Height < results[j].Height
+	})
+
+*/
 
 	return results, nil
 }
